@@ -20,11 +20,11 @@ PubSubClient client(espClient);
 
 byte brightness = 50;
 // How many leds in your strip?
-int numberLeds = 300;
+int numberLeds = 115;
 #define DATA_PIN 4
 #define FRAMES_PER_SECOND  120
 #define MAX_BRIGHTNESS 50
-#define MAX_LEDS          300
+#define MAX_LEDS          116
 // Define the array of leds => 60 leds/m => 15m
 CRGB leds[MAX_LEDS];
 
@@ -33,8 +33,27 @@ byte red, green, blue;
 // animation flag
 byte animation = 0;
 
+
+
+/*** GOOD COLORS *****
+   8B8989/255
+   ff6717
+   FF9329
+   FF7F8F
+   409CFF
+   e3e350
+   https://github.com/FastLED/FastLED/wiki/Pixel-reference#predefined-colors-list
+ ******/
+
+void reset() {
+        delay(3000);
+        ESP.restart();
+        delay(5000);
+}
+
 void checkUpdate() {
         Serial.println("Check for updates");
+        ESPhttpUpdate.rebootOnUpdate(true);
         t_httpUpdate_return ret = ESPhttpUpdate.update("https://upthrow.rondoe.com/update/esp?token=xhestcal842myu1ewrupfgpxsy1b352cq2psfohs2nrdxmvsxu0036pw9tdh5f4b", "", "A8 A8 4C 5D C7 5D 03 BB 1A 4C 47 13 B9 33 4C A6 4D AF 4A 63");
 
         switch(ret) {
@@ -53,6 +72,13 @@ void checkUpdate() {
         }
 }
 
+void saveColor(byte r, byte g, byte b) {
+        EEPROM.write(2, r);
+        EEPROM.write(3, g);
+        EEPROM.write(4, b);
+        EEPROM.commit();
+}
+
 void setColor(byte r, byte g, byte b) {
 
         for (int i = 0; i < numberLeds; i++) {
@@ -60,18 +86,19 @@ void setColor(byte r, byte g, byte b) {
                 leds[i].g = g;
                 leds[i].b = b;
         }
-
+        FastLED.show();
         red = r;
         green = g;
         blue = b;
 
-        EEPROM.write(2, r);
-        EEPROM.write(3, g);
-        EEPROM.write(4, b);
-        EEPROM.commit();
-
         animation = 0;
 
+}
+
+void saveBrightness(byte dim) {
+        // write brightness to eeprom
+        EEPROM.write(1, dim);
+        EEPROM.commit();
 }
 void setBrightness(byte dim) {
         // Return if 0, user must turn off
@@ -87,9 +114,28 @@ void setBrightness(byte dim) {
 
         FastLED.setBrightness( dim);
         brightness = dim;
-        // write brightness to eeprom
-        EEPROM.write(1, dim);
-        EEPROM.commit();
+
+}
+
+void initEEPROM() {
+        // read eeprom for values
+        EEPROM.begin(512);
+        byte initialized = EEPROM.read(0);
+        if(!initialized) {
+                EEPROM.write(1, 20);
+                EEPROM.write(2, 255);
+                EEPROM.write(3, 244);
+                EEPROM.write(4, 229);
+
+                // set to initialized
+                EEPROM.write(0, 1);
+                EEPROM.commit();
+        }
+
+        brightness = EEPROM.read(1);
+        red = EEPROM.read(2);
+        green = EEPROM.read(3);
+        blue = EEPROM.read(4);
 }
 
 void off() {
@@ -100,8 +146,10 @@ void off() {
 
 
 void on() {
+        initEEPROM();
         Serial.println("Turn on");
         // warm white
+        // FF9329
         // setColor(255, 147, 41);
         setColor(red, green, blue);
         setBrightness(brightness);
@@ -110,6 +158,8 @@ void on() {
 
 void stripSetup() {
 
+        // 5V , 3000 mA
+        FastLED.setMaxPowerInVoltsAndMilliamps(5,2500);
         // first reset all to black
         FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, MAX_LEDS);
         for (int i = 0; i < MAX_LEDS; i++) {
@@ -144,6 +194,11 @@ void wifi() {
         Serial.println(WiFi.localIP());
 }
 
+void sendAck(const char* cmd) {
+        // Once connected, publish an announcement...
+        client.publish("myhome/200/ACK", cmd);
+}
+
 void callback(char* topic, byte* payload, unsigned int length) {
         Serial.print("Message arrived [");
         Serial.print(topic);
@@ -158,6 +213,8 @@ void callback(char* topic, byte* payload, unsigned int length) {
         if (t.equals("myhome/200/0/V_DIMMER")) {
                 Serial.println("Set bright");
                 setBrightness(msg.toInt());
+                saveBrightness(msg.toInt());
+                sendAck("V_DIMMER");
                 return;
         }
 
@@ -172,6 +229,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
                 byte g = number >> 8 & 0xFF;
                 byte b = number & 0xFF;
                 setColor(r, g, b);
+                saveColor(r, g, b);
+                sendAck("V_RGB");
+                return;
         }
 
         if (t.equals("myhome/200/0/V_ANIMATION")) {
@@ -179,14 +239,49 @@ void callback(char* topic, byte* payload, unsigned int length) {
                 if(animation == 0) {
                         setColor(red, green, blue);
                 }
+                sendAck("V_ANIMATION");
+                return;
         }
 
         if(t.equals("myhome/200/0/V_UPDATE")) {
+                sendAck("V_UPDATE");
                 checkUpdate();
+                return;
+        }
+
+        if(t.equals("myhome/200/0/OFF")) {
+                off();
+                sendAck("OFF");
+                return;
+        }
+
+        if(t.equals("myhome/200/0/ON")) {
+                on();
+                sendAck("ON");
+                return;
+        }
+
+        if(t.equals("myhome/200/0/TOGGLE")) {
+                if(red==0x0 && green==0x0 && blue==0x0) {
+                        on();
+                }
+                else {
+                        off();
+                }
+                sendAck("TOGGLE");
+                return;
+        }
+
+        if(t.equals("myhome/200/0/RESET")) {
+                reset();
+                return;
         }
 }
 
 void reconnect() {
+        // connect to mqtt
+        client.setServer("192.168.1.5", 1883);
+        client.setCallback(callback);
         // Loop until we're reconnected
         while (!client.connected()) {
                 Serial.print("Attempting MQTT connection...");
@@ -199,10 +294,7 @@ void reconnect() {
                         // Once connected, publish an announcement...
                         // client.publish("outTopic", "hello world");
                         // ... and resubscribe
-                        client.subscribe("myhome/200/0/V_RGB");
-                        client.subscribe("myhome/200/0/V_DIMMER");
-                        client.subscribe("myhome/200/0/V_ANIMATION");
-                        client.subscribe("myhome/200/0/V_UPDATE");
+                        client.subscribe("myhome/200/0/#");
                 } else {
                         Serial.print("failed, rc=");
                         Serial.print(client.state());
@@ -213,26 +305,7 @@ void reconnect() {
         }
 }
 
-void initEEPROM() {
-        // read eeprom for values
-        EEPROM.begin(512);
-        byte initialized = EEPROM.read(0);
-        if(!initialized) {
-                EEPROM.write(1, 20);
-                EEPROM.write(2, 255);
-                EEPROM.write(3, 244);
-                EEPROM.write(4, 229);
 
-                // set to initialized
-                EEPROM.write(0, 1);
-                EEPROM.commit();
-        }
-
-        brightness = EEPROM.read(1);
-        red = EEPROM.read(2);
-        green = EEPROM.read(3);
-        blue = EEPROM.read(4);
-}
 
 
 /////// ANIMATIONS
@@ -484,47 +557,40 @@ void cylon() {
 
 
 
+void checkConnectionState() {
+        // reconnect if wifi drops
+        if(WiFi.status() == 6) {
+                wifi();
+        }
+}
+
 
 void setup() {
         // put your setup code here, to run once:
         Serial.begin(115200);
         Serial.println("ESP-Neopixel V1.0");
 
-        initEEPROM();
-
         // startup fastled
         stripSetup();
-        setColor(red, green, blue);
-        setBrightness(brightness);
         on();
         FastLED.show(); // display this frame
 
 
         wifi();
 
-        // connect to mqtt
-        client.setServer("192.168.1.2", 1883);
-        client.setCallback(callback);
+
+
         reconnect();
 
+        checkConnectionState();
         // check for software update
         checkUpdate();
 
         Serial.println("Setup completed.");
 
-
 }
 
-void checkConnectionState() {
-        // reconnect if wifi drops
-        if(WiFi.status() == 6) {
-                wifi();
-        }
 
-        if(!client.connected()) {
-                reconnect();
-        }
-}
 
 void loop() {
 
@@ -538,8 +604,12 @@ void loop() {
 
                 EVERY_N_MILLISECONDS(500) {
                         checkConnectionState();
-                        client.loop();
+                }
 
+                EVERY_N_MILLISECONDS(50) {
+                        if(!client.loop()) {
+                                reconnect();
+                        }
                 }
                 switch (animation) {
                 case 1:
@@ -565,13 +635,10 @@ void loop() {
                         }
                         break;
                 case 5:
-                        blendme();
-                        break;
-                case 6:
                         ChangeMe();                                         // Check the demo loop for changes to the variables.
                         mover();                            // Call our sequence.
                         break;
-                case 7:
+                case 6:
                         EVERY_N_MILLISECONDS(50) {
                                 nblendPaletteTowardPalette(currentPalette, targetPalette, maxChanges); // Blend towards the target palette
                         }
@@ -582,7 +649,7 @@ void loop() {
 
                         noise16_1();
                         break;
-                case 8:
+                case 7:
                         EVERY_N_MILLISECONDS(50) {
                                 nblendPaletteTowardPalette(currentPalette, targetPalette, maxChanges); // Blend towards the target palette
                         }
@@ -593,7 +660,7 @@ void loop() {
 
                         noise16_2();
                         break;
-                case 9:
+                case 8:
                         //  EVERY_N_MILLISECONDS(thisdelay) {                           // FastLED based non-blocking delay to update/display the sequence.
                         EVERY_N_MILLISECONDS(thisdelay) {   // FastLED based non-blocking delay to update/display the sequence.
                                 one_sine_pal(millis()>>4);
@@ -609,26 +676,32 @@ void loop() {
                                 targetPalette = CRGBPalette16(CHSV(random8(), 255, random8(128,255)), CHSV(random8(), 255, random8(128,255)), CHSV(random8(), 192, random8(128,255)), CHSV(random8(), 255, random8(128,255)));
                         }
                         break;
-                case 10:
+                case 9:
                         EVERY_N_MILLISECONDS(5) {                   // FastLED based non-blocking routine to update/display the sequence.
                                 rainbow_march();
                         }
                         break;
-                case 11:
+                case 10:
                         cylon();
                         break;
                 }
-
-
+                FastLED.show();
         }
         else {
-                checkConnectionState();
-                // Handle MQTT subscription
-                client.loop();
+                EVERY_N_MILLISECONDS(2000) {
+                        checkConnectionState();
+                }
+                EVERY_N_MILLISECONDS(50) {
+                        if(!client.loop()) {
+                                reconnect();
+                        }
+                        FastLED.show();
+                }
+
         }
 
 
         // send the 'leds' array out to the actual LED strip
-        FastLED.show();
+        // FastLED.show();
 
 }
